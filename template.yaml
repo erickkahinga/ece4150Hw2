@@ -1,0 +1,337 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Photo Gallery on EC2"
+Parameters:
+  PhotoBucketName:
+    Type: "String"
+    Description: "This is the globally-unique name of your S3 bucket for storing photos. It can be anything, but we recommend a name like photobucket2-yourlastname-classcode-year."
+  RDSMasterPassword:
+    Type: "String"
+    Description: "This is the password for the RDS database. It must have a minimum of eight characters and must not contain special characters, such as punctuation." 
+  KeyPairName:
+    Type: "String"
+    Description: "This is the name of the EC2 key pair you created. The value you enter here must match exactly the name given when you created the key pair." 
+Resources:
+
+  # Security Group
+  ECE4150Lab2SecurityGroup:
+      Type: "AWS::EC2::SecurityGroup"
+      Properties:
+        GroupDescription: "Allow SSH and MySQL traffic from anywhere"
+        VpcId: !Ref DefaultVPC
+        SecurityGroupIngress:
+          - IpProtocol: "tcp"
+            FromPort: 22
+            ToPort: 22
+            CidrIp: "0.0.0.0/0"  # Allow SSH from anywhere
+          - IpProtocol: "tcp"
+            FromPort: 3306
+            ToPort: 3306
+            CidrIp: "0.0.0.0/0"  # Allow MySQL access from anywhere
+          - IpProtocol: "tcp"
+            FromPort: 5000
+            ToPort: 5000
+            CidrIp: "0.0.0.0/0"  # Allow custom port 5000 access from anywhere
+          - IpProtocol: "tcp"
+            FromPort: 5001
+            ToPort: 5001
+            CidrIp: "0.0.0.0/0"  # Allow custom port 5000 access from anywhere
+
+  # Default VPC
+  DefaultVPC:
+      Type: "AWS::EC2::VPC"
+      Properties:
+        CidrBlock: "10.0.0.0/16"
+        EnableDnsSupport: true
+        EnableDnsHostnames: true
+
+  # EC2 Key Pair
+  # EC2KeyPair:
+  #     Type: "AWS::EC2::KeyPair"
+  #     Properties:
+  #       KeyName: "ECE4150Lab2"
+  #       KeyType: "rsa"
+
+  VPCInternetGateway:
+      Type: "AWS::EC2::InternetGateway"
+      Properties: {}
+    
+  AttachGatewayToVPC:
+      Type: "AWS::EC2::VPCGatewayAttachment"
+      Properties:
+        VpcId: !Ref DefaultVPC
+        InternetGatewayId: !Ref VPCInternetGateway
+
+# Route Table
+  RouteTable:
+      Type: "AWS::EC2::RouteTable"
+      Properties:
+        VpcId: !Ref DefaultVPC
+        Tags:
+          - Key: "Name"
+            Value: "PublicRouteTable"
+
+  PublicRoute:
+      Type: "AWS::EC2::Route"
+      Properties:
+        RouteTableId: !Ref RouteTable
+        DestinationCidrBlock: "0.0.0.0/0"
+        GatewayId: !Ref VPCInternetGateway
+
+  # Default Subnets
+  DefaultSubnet:
+      Type: "AWS::EC2::Subnet"
+      Properties:
+        VpcId: !Ref DefaultVPC
+        CidrBlock: "10.0.1.0/24"
+        AvailabilityZone: "us-east-1a"
+        MapPublicIpOnLaunch: true
+        Tags:
+          - Key: "Name"
+            Value: "PublicSubnet1"
+
+  DefaultSubnet2:
+      Type: "AWS::EC2::Subnet"
+      Properties:
+        VpcId: !Ref DefaultVPC
+        CidrBlock: "10.0.2.0/24"
+        AvailabilityZone: "us-east-1b"
+        MapPublicIpOnLaunch: true
+        Tags:
+          - Key: "Name"
+            Value: "PublicSubnet2"
+
+  SubnetRouteTableAssociation1:
+      Type: "AWS::EC2::SubnetRouteTableAssociation"
+      Properties:
+        SubnetId: !Ref DefaultSubnet
+        RouteTableId: !Ref RouteTable
+
+  SubnetRouteTableAssociation2:
+      Type: "AWS::EC2::SubnetRouteTableAssociation"
+      Properties:
+        SubnetId: !Ref DefaultSubnet2
+        RouteTableId: !Ref RouteTable
+
+
+  # # Default Subnet
+  # DefaultSubnet:
+  #     Type: "AWS::EC2::Subnet"
+  #     Properties:
+  #       VpcId: !Ref DefaultVPC
+  #       CidrBlock: "10.0.0.1/24"
+  #       AvailabilityZone: "us-east-1a"
+  #       MapPublicIpOnLaunch: true
+
+  # DefaultSubnet2:
+  #     Type: "AWS::EC2::Subnet"
+  #     Properties:
+  #       VpcId: !Ref DefaultVPC
+  #       CidrBlock: "10.0.2.0/24"
+  #       AvailabilityZone: "us-east-1b"
+  #       MapPublicIpOnLaunch: true
+
+
+  # DB Subnet Group
+  MyDBSubnetGroup:
+      Type: "AWS::RDS::DBSubnetGroup"
+      Properties:
+        DBSubnetGroupDescription: "Subnet group for RDS instance"
+        SubnetIds:
+          - !Ref DefaultSubnet
+          - !Ref DefaultSubnet2
+        DBSubnetGroupName: "MyDBSubnetGroup"
+
+  # EC2 Instance
+  MyEC2Instance:
+      Type: "AWS::EC2::Instance"
+      Properties:
+        InstanceType: "t2.micro"  # Free-tier instance type
+        ImageId: "ami-005fc0f236362e99f"  # Ubuntu
+        KeyName: !Ref KeyPairName
+        SecurityGroupIds:
+          - !Ref ECE4150Lab2SecurityGroup  # Attach the custom security group
+        SubnetId: !Ref DefaultSubnet  # Use default subnet
+        Tags:
+          - Key: "Name"
+            Value: "ECE4150-Lab-EC2"
+        BlockDeviceMappings:
+          - DeviceName: "/dev/xvda"
+            Ebs:
+              VolumeSize: 8  # Default root volume size in GiB
+              VolumeType: "gp2"
+
+  
+  # RDS Instance
+  MyRDSInstance:
+      Type: "AWS::RDS::DBInstance"
+      Properties:
+        DBInstanceIdentifier: "photogallerydb"
+        AllocatedStorage: 20  # Default free-tier storage
+        DBInstanceClass: "db.t3.micro"  # Free-tier instance type
+        Engine: "mysql"
+        EngineVersion: "8.0.32"
+        MasterUsername: "root"
+        MasterUserPassword: !Ref "RDSMasterPassword"  # Replace with a secure password
+        BackupRetentionPeriod: 7  # Default backup retention period
+        PubliclyAccessible: false  # Don't enable public access
+        MultiAZ: false  # Free-tier does not support Multi-AZ
+        StorageType: "gp2"  # General-purpose SSD
+        DBSubnetGroupName: !Ref MyDBSubnetGroup  # Default subnet group for default VPC
+        VPCSecurityGroups:
+          - !Ref ECE4150Lab2SecurityGroup
+        DBName: "photogallerydb"  # Initial database name
+
+  
+  # DynamoDB Table (PhotoGallery)
+  PhotoGalleryTable:
+      Type: "AWS::DynamoDB::Table"
+      Properties:
+        TableName: "photogallerydb"
+        AttributeDefinitions:
+          - AttributeName: "albumID"
+            AttributeType: "S"
+          - AttributeName: "photoID"
+            AttributeType: "S"
+        KeySchema:
+          - AttributeName: "albumID"
+            KeyType: "HASH"  # Partition key
+          - AttributeName: "photoID"
+            KeyType: "RANGE"  # Sort key
+        ProvisionedThroughput:
+          ReadCapacityUnits: 5
+          WriteCapacityUnits: 5
+
+  # S3 Bucket to Store Photos
+  PhotoGalleryBucket:
+      Type: "AWS::S3::Bucket"
+      Properties:
+          PublicAccessBlockConfiguration:
+              BlockPublicAcls: false
+              BlockPublicPolicy: false
+              IgnorePublicAcls: false
+              RestrictPublicBuckets: false
+          BucketName: !Ref "PhotoBucketName"
+          BucketEncryption: 
+              ServerSideEncryptionConfiguration: 
+                - 
+                  ServerSideEncryptionByDefault: 
+                      SSEAlgorithm: "AES256"
+                  BucketKeyEnabled: false
+          CorsConfiguration: 
+              CorsRules: 
+                - 
+                  AllowedHeaders: 
+                    - "Authorization"
+                  AllowedMethods: 
+                    - "GET"
+                  AllowedOrigins: 
+                    - "*"
+          OwnershipControls: 
+              Rules: 
+                - ObjectOwnership: "BucketOwnerPreferred"
+          AccessControl: "Private" 
+  
+  # S3 Bucket Policy to Allow Public Access
+  S3BucketPolicy:
+      Type: "AWS::S3::BucketPolicy"
+      Properties:
+        Bucket: !Ref PhotoGalleryBucket
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Sid: "PublicReadGetObject"
+              Effect: "Allow"
+              Principal: "*"
+              Action: "s3:GetObject"
+              Resource: !Sub "arn:aws:s3:::${PhotoGalleryBucket}/*"
+  
+
+  IAMUser:
+      Type: "AWS::IAM::User"
+      Properties:
+          Path: "/"
+          UserName: "ec2_instance_access_lab2"
+          ManagedPolicyArns: 
+            - "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess"
+            - "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+
+  IAMUser2:
+      Type: "AWS::IAM::User"
+      Properties:
+          Path: "/"
+          UserName: "github-user-lab2"
+          ManagedPolicyArns: 
+            - "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+
+  IAMRole:
+      Type: "AWS::IAM::Role"
+      Properties:
+          Path: "/"
+          RoleName: "apiS3PutGet-Role-Lab2"
+          AssumeRolePolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"apigateway.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+          MaxSessionDuration: 3600
+          ManagedPolicyArns: 
+            - "arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+            - "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+          Description: ""
+
+  IAMRole2:
+      Type: "AWS::IAM::Role"
+      Properties:
+          Path: "/"
+          RoleName: "lambda_photogallery_role_lab2"
+          AssumeRolePolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+          MaxSessionDuration: 3600
+          ManagedPolicyArns: 
+            - "arn:aws:iam::aws:policy/AmazonCognitoPowerUser"
+            - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+            - "arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess"
+          Description: ""
+
+  IAMRole3:
+      Type: "AWS::IAM::Role"
+      Properties:
+          Path: "/"
+          RoleName: "rds-monitoring-role-lab2"
+          AssumeRolePolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"\",\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"monitoring.rds.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+          MaxSessionDuration: 3600
+          ManagedPolicyArns: 
+            - "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole"
+
+  # IAMServiceLinkedRole:
+  #     Type: "AWS::IAM::ServiceLinkedRole"
+  #     Properties:
+  #         AWSServiceName: "ops.apigateway.amazonaws.com"
+  #         Description: "The Service Linked Role is used by Amazon API Gateway."
+
+  # since need to store access and secret key - it is better to create it through console        
+  # IAMAccessKey:
+  #     Type: "AWS::IAM::AccessKey"
+  #     Properties:
+  #         Status: "Active"
+  #         UserName: "ec2_instance_access_lab2"
+  #     DependsOn: IAMUser
+
+  # IAMAccessKey2:
+  #     Type: "AWS::IAM::AccessKey"
+  #     Properties:
+  #         Status: "Active"
+  #         UserName: "github-user-lab2"
+  #     DependsOn: IAMUser2
+
+Outputs:
+    EC2InstancePublicIP:
+      Description: "Public IP of the EC2 instance"
+      Value: !GetAtt MyEC2Instance.PublicIp
+
+    EC2InstancePublicDNS:
+      Description: "Public DNS name of the EC2 instance"
+      Value: !GetAtt MyEC2Instance.PublicDnsName
+
+    RDSInstanceEndpoint:
+      Description: "The endpoint of the RDS instance"
+      Value: !GetAtt MyRDSInstance.Endpoint.Address
+
+    RDSInstancePort:
+      Description: "The port of the RDS instance"
+      Value: !GetAtt MyRDSInstance.Endpoint.Port
