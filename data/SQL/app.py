@@ -252,6 +252,52 @@ def delete_photo(albumID, photoID):
     return redirect(url_for('view_photos', albumID=albumID))
 
 
+# delete album
+@app.route('/album/<string:albumID>/delete', methods=['POST'])
+@login_required
+def delete_album(albumID):
+    conn = get_database_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT * FROM photogallerydb.Album WHERE albumID = %s", (albumID,))
+    album = cursor.fetchone()
+    if not album:
+        conn.close()
+        return "Album not found", 404
+
+    cursor.execute("SELECT photoID, photoURL FROM photogallerydb.Photo WHERE albumID = %s", (albumID,))
+    photos = cursor.fetchall()
+
+    s3 = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY,
+                           aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
+
+    album_thumbnail_url = album['thumbnailURL']
+
+    try:
+        thumbnail_key = album_thumbnail_url.split('.com/')[1]
+        s3.delete_object(Bucket=PHOTOGALLERY_S3_BUCKET_NAME, Key=thumbnail_key)
+    except Exception as e:
+        print("Error deleting album thumbnail from S3:", e)
+
+    for photo in photos:
+        photo_url = photo['photoURL']
+        try:
+            photo_key = photo_url.split('.com/')[1]
+            s3.delete_object(Bucket=PHOTOGALLERY_S3_BUCKET_NAME, Key=photo_key)
+        except Exception as e:
+            print("Error deleting photo from S3:", e)
+
+    try:
+        cursor.execute("DELETE FROM photogallerydb.Album WHERE albumID = %s", (albumID,))
+        conn.commit()
+    except Exception as e:
+        conn.close()
+        return "Error deleting album from database: " + str(e), 500
+
+    conn.close()
+    return redirect(url_for('home_page'))
+
+
 """
 """
 

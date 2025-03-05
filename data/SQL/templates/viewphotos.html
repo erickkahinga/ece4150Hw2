@@ -34,6 +34,13 @@
                 <br> <a href="/">Home</a> | <a href="/album/{{albumID}}/addPhoto">Add Photo</a> | <a href="/logout">Logout</a>
                 <br>
                 <br>
+                <div>
+                    <form action="/album/{{ albumID }}/delete" method="post" onsubmit="return confirm('Are you sure you want to delete this album? All photos will be deleted as well.');">
+                        <button type="submit" class="btn btn-danger">Delete Album</button>
+                    </form> 
+                </div>               
+                <br>
+                <br>
                 <div class="container">
                     <div class="row">
                         <div class="col-md-12">
