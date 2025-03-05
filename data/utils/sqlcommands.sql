@@ -1,22 +1,14 @@
-DROP TABLE `User`;
-
+DROP TABLE IF EXISTS `User`;
 ----
-
 CREATE TABLE `User` (
-  `userID` varchar(100) NOT NULL,
-  `email` varchar(100) NOT NULL, 
-  `password` TEXT NOT NULL,
+  `userID` VARCHAR(100) NOT NULL,
+  `email` VARCHAR(255) NOT NULL,
+  `passwordHash` VARCHAR(255) NOT NULL,
+  `isVerified` BOOLEAN NOT NULL DEFAULT FALSE,
+  `firstName` TEXT NOT NULL,
+  `lastName` TEXT NOT NULL,
   `createdAt` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   `updatedAt` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`userID`),
   UNIQUE (`email`)
 );
-
-
-----
-
-ALTER TABLE `User` ADD `firstName` TEXT NOT NULL;
-
-----
-
-ALTER TABLE `User` ADD `lastName` TEXT NOT NULL;

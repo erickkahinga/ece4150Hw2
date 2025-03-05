@@ -1,9 +1,8 @@
 #!flask/bin/python
 import sys, os
 sys.path.append(os.path.abspath(os.path.join('..', 'utils')))
-from env import AWS_ACCESS_KEY, AWS_SECRET_ACCESS_KEY, AWS_REGION, PHOTOGALLERY_S3_BUCKET_NAME, RDS_DB_HOSTNAME, RDS_DB_USERNAME, RDS_DB_PASSWORD, RDS_DB_NAME
-from flask import Flask, jsonify, abort, request, make_response, url_for
-from flask import render_template, redirect
+from env import AWS_ACCESS_KEY, AWS_SECRET_ACCESS_KEY, AWS_REGION, PHOTOGALLERY_S3_BUCKET_NAME, RDS_DB_HOSTNAME, RDS_DB_USERNAME, RDS_DB_PASSWORD, RDS_DB_NAME, SECERT_KEY, CONFIRM_EMAIL_SALT, SES_EMAIL_SOURCE
+from flask import Flask, jsonify, abort, request, make_response, url_for, render_template, redirect, session
 import time
 import exifread
 import json
@@ -17,14 +16,17 @@ from pytz import timezone
     INSERT NEW LIBRARIES HERE (IF NEEDED)
 """
 
-
-
-
+from itsdangerous import URLSafeTimedSerializer, SignatureExpired
+from werkzeug.security import generate_password_hash, check_password_hash
+from botocore.exceptions import ClientError
+from functools import wraps
 
 """
 """
 
 app = Flask(__name__, static_url_path="")
+app.config['SECRET_KEY'] = SECERT_KEY
+serializer = URLSafeTimedSerializer(app.config['SECRET_KEY'])
 
 UPLOAD_FOLDER = os.path.join(app.root_path,'static','media')
 ALLOWED_EXTENSIONS = set(['png', 'jpg', 'jpeg'])
@@ -67,29 +69,28 @@ def get_database_connection():
     return conn
 
 def send_email(email, body):
+    sender = SES_EMAIL_SOURCE
+
+    if not sender:
+        raise ValueError("SES_EMAIL_SOURCE environment variable is not set.")
+    
     try:
         ses = boto3.client('ses', aws_access_key_id=AWS_ACCESS_KEY,
-                                aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-                                region_name=REGION)
-        ses.send_email(
-            Source=os.getenv('SES_EMAIL_SOURCE'),
+                           aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+                           region_name=AWS_REGION)
+        response = ses.send_email(
+            Source=sender,
             Destination={'ToAddresses': [email]},
             Message={
                 'Subject': {'Data': 'Photo Gallery: Confirm Your Account'},
-                'Body': {
-                    'Text': {'Data': body}
-                }
+                'Body': {'Text': {'Data': body}}
             }
         )
-
     except ClientError as e:
         print(e.response['Error']['Message'])
-
         return False
     else:
-        print("Email sent! Message ID:"),
-        print(response['MessageId'])
-
+        print("Email sent! Message ID:", response['MessageId'])
         return True
 
 
@@ -97,9 +98,14 @@ def send_email(email, body):
     INSERT YOUR NEW FUNCTION HERE (IF NEEDED)
 """
 
-
-
-
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            # Redirect to login page if user is not logged in
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
 
 """
 """
@@ -108,8 +114,142 @@ def send_email(email, body):
     INSERT YOUR NEW ROUTE HERE (IF NEEDED)
 """
 
+# Signup endpoint
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    if request.method == 'POST':
+        email = request.form.get('email')
+        full_name = request.form.get('name')
+        password = request.form.get('password')
+        password1 = request.form.get('password1')
+        
+        if not email or not full_name or not password or not password1:
+            return "Please fill out all fields.", 400
+        if password != password1:
+            return "Passwords do not match.", 400
+        
+        names = full_name.strip().split(' ', 1)
+        firstName = names[0]
+        lastName = names[1] if len(names) > 1 else ''
+        
+        hashed_password = generate_password_hash(password)
+        userID = str(uuid.uuid4())
+        
+        conn = get_database_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "INSERT INTO photogallerydb.User (userID, email, passwordHash, isVerified, firstName, lastName) VALUES (%s, %s, %s, %s, %s, %s)",
+                (userID, email, hashed_password, False, firstName, lastName)
+            )
+            conn.commit()
+        except Exception as e:
+            conn.close()
+            return f"Error creating account: {str(e)}", 400
+        conn.close()
+        
+        token = serializer.dumps(email, salt=CONFIRM_EMAIL_SALT)
+        confirm_url = url_for('confirm_email', token=token, _external=True)
+        email_body = f"Please confirm your email by clicking the following link: {confirm_url}"
+        
+        if not send_email(email, email_body):
+            return "Error: Unable to send confirmation email. Please check your SES configuration.", 400
+        
+        return "A confirmation email has been sent. Please check your inbox."
+    else:
+        return render_template('signup.html')
 
 
+# confirm email endpoint
+@app.route('/confirmemail/<token>')
+def confirm_email(token):
+    try:
+        email = serializer.loads(token, salt=CONFIRM_EMAIL_SALT, max_age=3600)
+    except SignatureExpired:
+        return "The confirmation link has expired.", 400
+    except Exception as e:
+        return "Invalid confirmation token.", 400
+
+    conn = get_database_connection()
+    cursor = conn.cursor()
+    cursor.execute("UPDATE photogallerydb.User SET isVerified = TRUE WHERE email = %s", (email,))
+    conn.commit()
+    conn.close()
+    
+    return render_template('emailconfirmed.html')
+
+
+# login endpoint
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        email = request.form.get('email')
+        password = request.form.get('password')
+        
+        if not email or not password:
+            return "Please provide email and password.", 400
+        
+        conn = get_database_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM photogallerydb.User WHERE email = %s", (email,))
+        user = cursor.fetchone()
+        conn.close()
+        
+        if user and check_password_hash(user['passwordHash'], password):
+            if not user['isVerified']:
+                return "Your account is not verified. Please check your email.", 400
+            session['user_id'] = user['userID']
+            return redirect('/')
+        else:
+            return "Invalid email or password.", 400
+    else:
+        return render_template('login.html')
+
+
+# logout endpoint
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+
+# delete photo endpoint
+@app.route('/album/<string:albumID>/photo/<string:photoID>/delete', methods=['POST'])
+@login_required
+def delete_photo(albumID, photoID):
+    conn = get_database_connection()
+    cursor = conn.cursor()
+
+    statement = "SELECT photoURL FROM photogallerydb.Photo WHERE photoID = %s AND albumID = %s"
+    cursor.execute(statement, (photoID, albumID))
+    result = cursor.fetchone()
+    if not result:
+        conn.close()
+        return "Photo not found", 404
+
+    photoURL = result['photoURL']
+
+    try:
+        key = photoURL.split('.com/')[1]
+    except IndexError:
+        conn.close()
+        return "Invalid photo URL format.", 400
+
+    s3 = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY,
+                           aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
+    try:
+        s3.delete_object(Bucket=PHOTOGALLERY_S3_BUCKET_NAME, Key=key)
+    except Exception as e:
+        print("Error deleting S3 object:", e)
+        conn.close()
+        return "Error deleting photo from S3", 500
+
+    delete_statement = "DELETE FROM photogallerydb.Photo WHERE photoID = %s AND albumID = %s"
+    cursor.execute(delete_statement, (photoID, albumID))
+    conn.commit()
+    conn.close()
+
+    return redirect(url_for('view_photos', albumID=albumID))
 
 
 """
@@ -140,6 +280,7 @@ def not_found(error):
 
 
 @app.route('/', methods=['GET'])
+@login_required
 def home_page():
     """ Home page route.
 
@@ -172,6 +313,7 @@ def home_page():
 
 
 @app.route('/createAlbum', methods=['GET', 'POST'])
+@login_required
 def add_album():
     """ Create new album route.
 
@@ -213,6 +355,7 @@ def add_album():
 
 
 @app.route('/album/<string:albumID>', methods=['GET'])
+@login_required
 def view_photos(albumID):
     """ Album page route.
 
@@ -248,6 +391,7 @@ def view_photos(albumID):
 
 
 @app.route('/album/<string:albumID>/addPhoto', methods=['GET', 'POST'])
+@login_required
 def add_photo(albumID):
     """ Create new photo under album route.
 
@@ -300,6 +444,7 @@ def add_photo(albumID):
 
 
 @app.route('/album/<string:albumID>/photo/<string:photoID>', methods=['GET'])
+@login_required
 def view_photo(albumID, photoID):  
     """ photo page route.
 
@@ -348,6 +493,7 @@ def view_photo(albumID, photoID):
 
 
 @app.route('/album/search', methods=['GET'])
+@login_required
 def search_album_page():
     """ search album page route.
 
@@ -381,6 +527,7 @@ def search_album_page():
 
 
 @app.route('/album/<string:albumID>/search', methods=['GET'])
+@login_required
 def search_photo_page(albumID):
     """ search photo page route.
 
