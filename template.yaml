@@ -201,6 +201,22 @@ Resources:
           ReadCapacityUnits: 5
           WriteCapacityUnits: 5
 
+  # DynamoDB Table (PhotoGalleryUser)
+  PhotoGalleryUserTable:
+      Type: "AWS::DynamoDB::Table"
+      Properties:
+        TableName: "PhotoGalleryUser"
+        AttributeDefinitions:
+          - AttributeName: "email"  
+            AttributeType: "S"
+        KeySchema:
+          - AttributeName: "email"
+            KeyType: "HASH"
+        ProvisionedThroughput:
+          ReadCapacityUnits: 5
+          WriteCapacityUnits: 5 
+
+
   # S3 Bucket to Store Photos
   PhotoGalleryBucket:
       Type: "AWS::S3::Bucket"

@@ -1,9 +1,8 @@
 #!flask/bin/python
 import sys, os
 sys.path.append(os.path.abspath(os.path.join('..', 'utils')))
-from env import AWS_ACCESS_KEY, AWS_SECRET_ACCESS_KEY, AWS_REGION, PHOTOGALLERY_S3_BUCKET_NAME, DYNAMODB_TABLE
-from flask import Flask, jsonify, abort, request, make_response, url_for
-from flask import render_template, redirect
+from env import AWS_ACCESS_KEY, AWS_SECRET_ACCESS_KEY, AWS_REGION, PHOTOGALLERY_S3_BUCKET_NAME, DYNAMODB_TABLE, SECERT_KEY, CONFIRM_EMAIL_SALT, SES_EMAIL_SOURCE, DYNAMODB_USER_TABLE
+from flask import Flask, jsonify, abort, request, make_response, url_for, render_template, redirect, session
 import time
 import exifread
 import json
@@ -18,20 +17,25 @@ import pytz
     INSERT NEW LIBRARIES HERE (IF NEEDED)
 """
 
-
-
-
+from itsdangerous import URLSafeTimedSerializer, SignatureExpired
+from werkzeug.security import generate_password_hash, check_password_hash
+from botocore.exceptions import ClientError
+from functools import wraps
+from urllib.parse import urlparse
 
 """
 """
 
 app = Flask(__name__, static_url_path="")
+app.config['SECRET_KEY'] = SECERT_KEY
+serializer = URLSafeTimedSerializer(app.config['SECRET_KEY'])
 
 dynamodb = boto3.resource('dynamodb', aws_access_key_id=AWS_ACCESS_KEY,
                             aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
                             region_name=AWS_REGION)
 
-table = dynamodb.Table(DYNAMODB_TABLE)
+photo_table = dynamodb.Table(DYNAMODB_TABLE)
+user_table = dynamodb.Table(DYNAMODB_USER_TABLE)
 
 UPLOAD_FOLDER = os.path.join(app.root_path,'static','media')
 ALLOWED_EXTENSIONS = set(['png', 'jpg', 'jpeg'])
@@ -67,9 +71,41 @@ def s3uploading(filename, filenameWithPath, uploadType="photos"):
     INSERT YOUR NEW FUNCTION HERE (IF NEEDED)
 """
 
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
 
 
+def send_email(email, body):
+    sender = SES_EMAIL_SOURCE
+    if not sender:
+        raise ValueError("SES_EMAIL_SOURCE environment variable is not set.")
+    try:
+        ses = boto3.client('ses', aws_access_key_id=AWS_ACCESS_KEY,
+                           aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+                           region_name=AWS_REGION)
+        response = ses.send_email(
+            Source=sender,
+            Destination={'ToAddresses': [email]},
+            Message={
+                'Subject': {'Data': 'Photo Gallery: Confirm Your Account'},
+                'Body': {'Text': {'Data': body}}
+            }
+        )
+    except ClientError as e:
+        print(e.response['Error']['Message'])
+        return False
+    else:
+        print("Email sent! Message ID:", response['MessageId'])
+        return True
 
+def get_s3_key(url):
+    parsed = urlparse(url)
+    return parsed.path.lstrip('/')
 
 """
 """
@@ -78,9 +114,236 @@ def s3uploading(filename, filenameWithPath, uploadType="photos"):
     INSERT YOUR NEW ROUTE HERE (IF NEEDED)
 """
 
+# signup endpoint
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    if request.method == 'POST':
+        email = request.form.get('email')
+        full_name = request.form.get('name')
+        password = request.form.get('password')
+        password1 = request.form.get('password1')
+        
+        if not email or not full_name or not password or not password1:
+            return "Please fill out all fields.", 400
+        if password != password1:
+            return "Passwords do not match.", 400
+        
+        names = full_name.strip().split(' ', 1)
+        firstName = names[0]
+        lastName = names[1] if len(names) > 1 else ''
+        
+        hashed_password = generate_password_hash(password)
+        userID = str(uuid.uuid4())
+        
+        createdAt = datetime.now().astimezone().astimezone(pytz.utc).strftime("%Y-%m-%d %H:%M:%S")
+        
+        try:
+            user_table.put_item(
+                Item={
+                    "userID": userID,
+                    "email": email,
+                    "firstName": firstName,
+                    "lastName": lastName,
+                    "passwordHash": hashed_password,
+                    "isVerified": False,
+                    "createdAt": createdAt
+                },
+                ConditionExpression="attribute_not_exists(email)"
+            )
+        except Exception as e:
+            return f"Error creating account: {str(e)}", 400
+        
+        token = serializer.dumps(email, salt=CONFIRM_EMAIL_SALT)
+        confirm_url = url_for('confirm_email', token=token, _external=True)
+        email_body = f"Please confirm your email by clicking this link: {confirm_url}"
+        
+        if not send_email(email, email_body):
+            return "Error: Unable to send confirmation email. Please check your SES configuration.", 400
+        
+        return "A confirmation email has been sent. Please check your inbox."
+    else:
+        return render_template('signup.html')
+
+# confirm email endpoint
+@app.route('/confirmemail/<token>')
+def confirm_email(token):
+    try:
+        email = serializer.loads(token, salt="email-confirm-salt", max_age=3600)
+    except SignatureExpired:
+        return "The confirmation link has expired.", 400
+    except Exception as e:
+        return "Invalid confirmation token.", 400
+
+    try:
+        user_table.update_item(
+            Key={"email": email},
+            UpdateExpression="SET isVerified = :val",
+            ExpressionAttributeValues={":val": True}
+        )
+    except Exception as e:
+        return f"Error updating user verification status: {str(e)}", 500
+
+    return render_template('emailconfirmed.html')
+
+
+# login endpoint
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        email = request.form.get('email')
+        password = request.form.get('password')
+        
+        if not email or not password:
+            return "Please provide email and password.", 400
+        
+        response = user_table.get_item(Key={"email": email})
+        user = response.get('Item')
+        
+        if user and check_password_hash(user['passwordHash'], password):
+            if not user.get('isVerified', False):
+                return "Your account is not verified. Please check your email.", 400
+            session['user_id'] = user['userID']
+            session['email'] = user['email']
+            return redirect(url_for('home_page'))
+        else:
+            return "Invalid email or password.", 400
+    else:
+        return render_template('login.html')
+
+
+# delete photo endpoint
+@app.route('/album/<string:albumID>/photo/<string:photoID>/delete', methods=['POST'])
+@login_required
+def delete_photo(albumID, photoID):
+    try:
+        response = photo_table.get_item(Key={'albumID': albumID, 'photoID': photoID})
+    except Exception as e:
+        print("Error retrieving photo item:", e)
+        return "Error retrieving photo record", 500
+
+    if 'Item' not in response:
+        return "Photo not found", 404
+
+    photo = response['Item']
+    photoURL = photo.get('photoURL')
+    if not photoURL:
+        return "Photo URL not found", 400
+
+    try:
+        key = photoURL.split('.com/')[1]
+    except IndexError:
+        return "Invalid photo URL format", 400
+
+    s3 = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY,
+                           aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
+    try:
+        s3.delete_object(Bucket=PHOTOGALLERY_S3_BUCKET_NAME, Key=key)
+    except Exception as e:
+        print("Error deleting S3 object:", e)
+        return "Error deleting photo from S3", 500
+
+    try:
+        photo_table.delete_item(Key={'albumID': albumID, 'photoID': photoID})
+    except Exception as e:
+        print("Error deleting DynamoDB item:", e)
+        return "Error deleting photo record from database", 500
+
+    return redirect(url_for('view_photos', albumID=albumID))
+
+
+# delete album endpoint
+@app.route('/album/<string:albumID>/delete', methods=['POST'])
+@login_required
+def delete_album(albumID):
+    album_response = photo_table.query(
+        KeyConditionExpression=Key('albumID').eq(albumID) & Key('photoID').eq('thumbnail')
+    )
+    if not album_response['Items']:
+        return "Album not found", 404
+
+    album_meta = album_response['Items'][0]
+
+    s3 = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY,
+                           aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
+
+    thumb_url = album_meta.get('thumbnailURL')
+    if thumb_url:
+        try:
+            thumb_key = thumb_url.split('.com/')[1]
+            s3.delete_object(Bucket=PHOTOGALLERY_S3_BUCKET_NAME, Key=thumb_key)
+        except Exception as e:
+            print("Error deleting album thumbnail from S3:", e)
+
+    album_items_response = photo_table.query(
+        KeyConditionExpression=Key('albumID').eq(albumID)
+    )
+    items = album_items_response.get('Items', [])
+
+    for item in items:
+        photo_url = item.get('photoURL')
+        if photo_url:
+            try:
+                photo_key = photo_url.split('.com/')[1]
+                s3.delete_object(Bucket=PHOTOGALLERY_S3_BUCKET_NAME, Key=photo_key)
+            except Exception as e:
+                print("Error deleting photo from S3:", e)
+        try:
+            photo_table.delete_item(Key={'albumID': albumID, 'photoID': item['photoID']})
+        except Exception as e:
+            print("Error deleting item from DynamoDB:", e)
+
+    return redirect(url_for('home_page'))
+
+
+# delete user account endpoint
+@app.route('/delete_account', methods=['POST'])
+@login_required
+def delete_account():
+    user_id = session.get('user_id')
+    user_email = session.get('email')
+    if not user_id or not user_email:
+        return "User information missing from session.", 400
+
+    try:
+        user_table.delete_item(Key={"email": user_email})
+    except Exception as e:
+        return f"Error deleting user account: {str(e)}", 500
+
+    try:
+        response = photo_table.scan(FilterExpression=Attr('userID').eq(user_id))
+        items = response.get('Items', [])
+    except Exception as e:
+        return f"Error scanning photo table: {str(e)}", 500
+
+    s3 = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY,
+                      aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
+
+    for item in items:
+        photo_url = item.get('photoURL')
+        if photo_url:
+            try:
+                key = get_s3_key(photo_url)
+                s3.delete_object(Bucket=PHOTOGALLERY_S3_BUCKET_NAME, Key=key)
+            except Exception as e:
+                print("Error deleting S3 object for photo:", e)
+        try:
+            album_id = item.get('albumID')
+            photo_id = item.get('photoID')
+            if album_id and photo_id:
+                photo_table.delete_item(Key={'albumID': album_id, 'photoID': photo_id})
+        except Exception as e:
+            print("Error deleting photo record:", e)
+
+    session.clear()
+    return redirect(url_for('signup'))
 
 
 
+# logout endpoint
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
 
 """
 """
@@ -110,6 +373,7 @@ def not_found(error):
 
 
 @app.route('/', methods=['GET'])
+@login_required
 def home_page():
     """ Home page route.
 
@@ -117,7 +381,7 @@ def home_page():
         description: Endpoint to return home page.
         responses: Returns all the albums.
     """
-    response = table.scan(FilterExpression=Attr('photoID').eq("thumbnail"))
+    response = photo_table.scan(FilterExpression=Attr('photoID').eq("thumbnail"))
     results = response['Items']
 
     if len(results) > 0:
@@ -131,6 +395,7 @@ def home_page():
 
 
 @app.route('/createAlbum', methods=['GET', 'POST'])
+@login_required
 def add_album():
     """ Create new album route.
 
@@ -160,14 +425,15 @@ def add_album():
             createdAtlocalTime = datetime.now().astimezone()
             createdAtUTCTime = createdAtlocalTime.astimezone(pytz.utc)
 
-            table.put_item(
+            photo_table.put_item(
                 Item={
                     "albumID": str(albumID),
                     "photoID": "thumbnail",
                     "name": name,
                     "description": description,
                     "thumbnailURL": uploadedFileURL,
-                    "createdAt": createdAtUTCTime.strftime("%Y-%m-%d %H:%M:%S")
+                    "createdAt": createdAtUTCTime.strftime("%Y-%m-%d %H:%M:%S"),
+                    "userID": session.get('user_id')
                 }
             )
 
@@ -178,6 +444,7 @@ def add_album():
 
 
 @app.route('/album/<string:albumID>', methods=['GET'])
+@login_required
 def view_photos(albumID):
     """ Album page route.
 
@@ -185,10 +452,10 @@ def view_photos(albumID):
         description: Endpoint to return an album.
         responses: Returns all the photos of a particular album.
     """
-    albumResponse = table.query(KeyConditionExpression=Key('albumID').eq(albumID) & Key('photoID').eq('thumbnail'))
+    albumResponse = photo_table.query(KeyConditionExpression=Key('albumID').eq(albumID) & Key('photoID').eq('thumbnail'))
     albumMeta = albumResponse['Items']
 
-    response = table.scan(FilterExpression=Attr('albumID').eq(albumID) & Attr('photoID').ne('thumbnail'))
+    response = photo_table.scan(FilterExpression=Attr('albumID').eq(albumID) & Attr('photoID').ne('thumbnail'))
     items = response['Items']
 
     return render_template('viewphotos.html', photos=items, albumID=albumID, albumName=albumMeta[0]['name'])
@@ -196,6 +463,7 @@ def view_photos(albumID):
 
 
 @app.route('/album/<string:albumID>/addPhoto', methods=['GET', 'POST'])
+@login_required
 def add_photo(albumID):
     """ Create new photo under album route.
 
@@ -230,7 +498,7 @@ def add_photo(albumID):
             createdAtUTCTime = createdAtlocalTime.astimezone(pytz.utc)
             updatedAtUTCTime = updatedAtlocalTime.astimezone(pytz.utc)
 
-            table.put_item(
+            photo_table.put_item(
                 Item={
                     "albumID": str(albumID),
                     "photoID": str(photoID),
@@ -240,7 +508,8 @@ def add_photo(albumID):
                     "photoURL": uploadedFileURL,
                     "EXIF": ExifDataStr,
                     "createdAt": createdAtUTCTime.strftime("%Y-%m-%d %H:%M:%S"),
-                    "updatedAt": updatedAtUTCTime.strftime("%Y-%m-%d %H:%M:%S")
+                    "updatedAt": updatedAtUTCTime.strftime("%Y-%m-%d %H:%M:%S"),
+                    "userID": session.get('user_id')
                 }
             )
 
@@ -248,7 +517,7 @@ def add_photo(albumID):
 
     else:
 
-        albumResponse = table.query(KeyConditionExpression=Key('albumID').eq(albumID) & Key('photoID').eq('thumbnail'))
+        albumResponse = photo_table.query(KeyConditionExpression=Key('albumID').eq(albumID) & Key('photoID').eq('thumbnail'))
         albumMeta = albumResponse['Items']
 
         return render_template('photoForm.html', albumID=albumID, albumName=albumMeta[0]['name'])
@@ -256,6 +525,7 @@ def add_photo(albumID):
 
 
 @app.route('/album/<string:albumID>/photo/<string:photoID>', methods=['GET'])
+@login_required
 def view_photo(albumID, photoID):
     """ photo page route.
 
@@ -263,10 +533,10 @@ def view_photo(albumID, photoID):
         description: Endpoint to return a photo.
         responses: Returns a photo from a particular album.
     """ 
-    albumResponse = table.query(KeyConditionExpression=Key('albumID').eq(albumID) & Key('photoID').eq('thumbnail'))
+    albumResponse = photo_table.query(KeyConditionExpression=Key('albumID').eq(albumID) & Key('photoID').eq('thumbnail'))
     albumMeta = albumResponse['Items']
 
-    response = table.query( KeyConditionExpression=Key('albumID').eq(albumID) & Key('photoID').eq(photoID))
+    response = photo_table.query( KeyConditionExpression=Key('albumID').eq(albumID) & Key('photoID').eq(photoID))
     results = response['Items']
 
     if len(results) > 0:
@@ -297,6 +567,7 @@ def view_photo(albumID, photoID):
 
 
 @app.route('/album/search', methods=['GET'])
+@login_required
 def search_album_page():
     """ search album page route.
 
@@ -306,7 +577,7 @@ def search_album_page():
     """ 
     query = request.args.get('query', None)    
 
-    response = table.scan(FilterExpression=Attr('name').contains(query) | Attr('description').contains(query))
+    response = photo_table.scan(FilterExpression=Attr('name').contains(query) | Attr('description').contains(query))
     results = response['Items']
 
     items=[]
@@ -324,6 +595,7 @@ def search_album_page():
 
 
 @app.route('/album/<string:albumID>/search', methods=['GET'])
+@login_required
 def search_photo_page(albumID):
     """ search photo page route.
 
@@ -333,7 +605,7 @@ def search_photo_page(albumID):
     """ 
     query = request.args.get('query', None)    
 
-    response = table.scan(FilterExpression=Attr('title').contains(query) | Attr('description').contains(query) | Attr('tags').contains(query) | Attr('EXIF').contains(query))
+    response = photo_table.scan(FilterExpression=Attr('title').contains(query) | Attr('description').contains(query) | Attr('tags').contains(query) | Attr('EXIF').contains(query))
     results = response['Items']
 
     items=[]

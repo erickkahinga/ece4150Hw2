@@ -26,6 +26,8 @@
    <center><h2>Photo Gallery</h2>
     <br>
     <div id="message"></div>
+    <div id="messageaction"></div>
+    </center>
         <!--========== PAGE CONTENT ==========-->
         <div class="content-sm container">
             <div class="row">
@@ -34,15 +36,15 @@
                     <article class="blog-grid margin-b-30">
                         <!-- Blog Grid Content -->
                         <div class="blog-grid-content">
-                            <h2 class="blog-grid-title-lg">Email confirm please login :)</h2>
-                            <form id="loginform" method='post' action="/login">
-                           
-                                <input type="text" name="email" id="email" class="form-control" placeholder="Enter email"><br>
-                            
-                                <input type="password" name="password" id="password" class="form-control" placeholder="Enter password" >
-                                <br>
+                            <h2 class="blog-grid-title-lg">Signup</h2>
+                            <form  method='post' action="/signup" id="signupform" >                   
+                                <!-- <input type="text" name="username" id="username" class="form-control" placeholder="Enter username"><br> -->
+                                <input type="text" name="name" id="name" class="form-control" placeholder="Enter full name"><br>
+                                <input type="email" name="email" id="email" class="form-control" placeholder="Enter email"><br>
+                                <input type="password" name="password" id="password" class="form-control" placeholder="Enter password" ><br>
+                                <input type="password" name="password1" id="password1" class="form-control" placeholder="Repeat password" ><br>
                                 <button type="submit" class="btn-base-bg btn-base-sm radius-3" >
-                                    Login
+                                    Signup
                                 </button>
                             </form>
                         </div>
@@ -50,14 +52,13 @@
                     </article>
                     <!-- End Blog Grid -->
 
-                    <!-- <a href="signup">Sign up</a> | <a onclick="event.preventDefault(); alert('Not implemented!');" href="forgot-password.html">Forgot Password</a> -->
+                    <a href="login">Login</a>
                 </div>
 
                
             </div>
             <!--// end row -->
         </div>
-    </center>
         <!--========== END PAGE CONTENT ==========-->
 
     </div>

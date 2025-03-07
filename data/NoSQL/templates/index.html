@@ -30,7 +30,10 @@
             <br>
             <center>
                 <h2>Photo Gallery</h2>
-                <br> <a href="/">Home</a> | <a href="/createAlbum">Create Album</a>
+                <br> <a href="/">Home</a> | <a href="/createAlbum">Create Album</a> | <a href="/logout">Logout</a> | 
+                <form action="/delete_account" method="post" onsubmit="return confirm('Are you sure you want to delete your account? This action cannot be undone.');" style="display:inline;">
+                    <button type="submit" class="btn btn-danger">Delete Account</button>
+                </form>
                 <br>
                 <br>
                 <div class="container">

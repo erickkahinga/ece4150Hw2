@@ -20,6 +20,7 @@ from itsdangerous import URLSafeTimedSerializer, SignatureExpired
 from werkzeug.security import generate_password_hash, check_password_hash
 from botocore.exceptions import ClientError
 from functools import wraps
+from urllib.parse import urlparse
 
 """
 """
@@ -199,6 +200,7 @@ def login():
             if not user['isVerified']:
                 return "Your account is not verified. Please check your email.", 400
             session['user_id'] = user['userID']
+            session['email'] = user['email']
             return redirect('/')
         else:
             return "Invalid email or password.", 400
