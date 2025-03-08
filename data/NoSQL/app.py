@@ -71,6 +71,7 @@ def s3uploading(filename, filenameWithPath, uploadType="photos"):
     INSERT YOUR NEW FUNCTION HERE (IF NEEDED)
 """
 
+# login function
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -103,6 +104,7 @@ def send_email(email, body):
         print("Email sent! Message ID:", response['MessageId'])
         return True
 
+# s3 key function
 def get_s3_key(url):
     parsed = urlparse(url)
     return parsed.path.lstrip('/')

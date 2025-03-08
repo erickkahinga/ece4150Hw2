@@ -99,14 +99,19 @@ def send_email(email, body):
     INSERT YOUR NEW FUNCTION HERE (IF NEEDED)
 """
 
+# login functions
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'user_id' not in session:
-            # Redirect to login page if user is not logged in
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
+
+# s3 key functions
+def get_s3_key(url):
+    parsed = urlparse(url)
+    return parsed.path.lstrip('/')
 
 """
 """
@@ -300,6 +305,94 @@ def delete_album(albumID):
     return redirect(url_for('home_page'))
 
 
+# delete account endpoint
+@app.route('/delete_account', methods=['POST'])
+@login_required
+def delete_account():
+    user_id = session.get('user_id')
+    if not user_id:
+        return "User information missing from session.", 400
+
+    conn = get_database_connection()
+    cursor = conn.cursor()
+
+    s3 = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY,
+                      aws_secret_access_key=AWS_SECRET_ACCESS_KEY)
+
+    try:
+        cursor.execute("SELECT albumID, thumbnailURL FROM photogallerydb.Album WHERE userID = %s", (user_id,))
+        albums = cursor.fetchall()
+    except Exception as e:
+        conn.close()
+        return f"Error retrieving albums: {str(e)}", 500
+
+    for album in albums:
+        album_id = album['albumID']
+        thumbnail_url = album.get('thumbnailURL')
+        if thumbnail_url:
+            try:
+                thumb_key = get_s3_key(thumbnail_url)
+                s3.delete_object(Bucket=PHOTOGALLERY_S3_BUCKET_NAME, Key=thumb_key)
+            except Exception as e:
+                print("Error deleting album thumbnail from S3:", e)
+        try:
+            cursor.execute("SELECT photoID, photoURL FROM photogallerydb.Photo WHERE albumID = %s", (album_id,))
+            photos = cursor.fetchall()
+            for photo in photos:
+                photo_url = photo.get('photoURL')
+                if photo_url:
+                    try:
+                        photo_key = get_s3_key(photo_url)
+                        s3.delete_object(Bucket=PHOTOGALLERY_S3_BUCKET_NAME, Key=photo_key)
+                    except Exception as e:
+                        print("Error deleting photo from S3:", e)
+                try:
+                    cursor.execute("DELETE FROM photogallerydb.Photo WHERE photoID = %s AND albumID = %s", (photo['photoID'], album_id))
+                except Exception as e:
+                    print("Error deleting photo record:", e)
+            conn.commit()
+        except Exception as e:
+            print("Error processing photos in album:", e)
+
+        try:
+            cursor.execute("DELETE FROM photogallerydb.Album WHERE albumID = %s", (album_id,))
+            conn.commit()
+        except Exception as e:
+            print("Error deleting album record:", e)
+
+    try:
+        cursor.execute("SELECT photoID, albumID, photoURL FROM photogallerydb.Photo WHERE userID = %s", (user_id,))
+        orphan_photos = cursor.fetchall()
+        for photo in orphan_photos:
+            photo_url = photo.get('photoURL')
+            if photo_url:
+                try:
+                    photo_key = get_s3_key(photo_url)
+                    s3.delete_object(Bucket=PHOTOGALLERY_S3_BUCKET_NAME, Key=photo_key)
+                except Exception as e:
+                    print("Error deleting orphan photo from S3:", e)
+            try:
+                cursor.execute("DELETE FROM photogallerydb.Photo WHERE photoID = %s AND albumID = %s", (photo['photoID'], photo['albumID']))
+            except Exception as e:
+                print("Error deleting orphan photo record:", e)
+            conn.commit()
+    except Exception as e:
+        print("Error processing orphan photos:", e)
+
+    try:
+        cursor.execute("DELETE FROM photogallerydb.User WHERE userID = %s", (user_id,))
+        conn.commit()
+    except Exception as e:
+        conn.close()
+        return f"Error deleting user account: {str(e)}", 500
+
+    cursor.close()
+    conn.close()
+    
+    session.clear()
+    return redirect(url_for('signup'))
+
+
 """
 """
 
@@ -390,9 +483,9 @@ def add_album():
 
             conn=get_database_connection()
             cursor = conn.cursor ()
-            statement = f'''INSERT INTO photogallerydb.Album (albumID, name, description, thumbnailURL) VALUES (%s, %s, %s, %s);'''
-            
-            result = cursor.execute(statement, (albumID, name, description, uploadedFileURL))
+            statement = '''INSERT INTO photogallerydb.Album (albumID, name, description, thumbnailURL, userID) VALUES (%s, %s, %s, %s, %s);'''
+
+            result = cursor.execute(statement, (albumID, name, description, uploadedFileURL, session['user_id']))
             conn.commit()
             conn.close()
 
@@ -471,9 +564,9 @@ def add_photo(albumID):
             conn=get_database_connection()
             cursor = conn.cursor ()
             ExifDataStr = json.dumps(ExifData)
-            statement = f'''INSERT INTO photogallerydb.Photo (PhotoID, albumID, title, description, tags, photoURL, EXIF) VALUES (%s, %s, %s, %s, %s, %s, %s);'''
-            
-            result = cursor.execute(statement, (photoID, albumID, title, description, tags, uploadedFileURL, ExifDataStr,))
+            statement = '''INSERT INTO photogallerydb.Photo (PhotoID, albumID, title, description, tags, photoURL, EXIF, userID) VALUES (%s, %s, %s, %s, %s, %s, %s, %s);'''
+
+            result = cursor.execute(statement, (photoID, albumID, title, description, tags, uploadedFileURL, ExifDataStr, session['user_id']))
             conn.commit()
             conn.close()
 
